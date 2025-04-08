@@ -17,6 +17,10 @@ lazy_static! {
 }
 
 lazy_static! {
+    static ref FRAC_SCALAR_ORDER_2: BigUint = SCALAR_ORDER.div_euclid(&BigUint::from(2 as u32));
+}
+
+lazy_static! {
     static ref BASE_FIELD: BigUint = {
         BigUint::parse_bytes(
             b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
@@ -163,6 +167,10 @@ impl EllipticCurve for Secp256k1Point {
         r.value = b32_copied;
 
         Secp256k1Scalar(scalar_reduce(&r))
+    }
+
+    fn is_high(s: &Self::Scalar) -> bool {
+        BigUint::from_bytes_le(&s.0.value) > *FRAC_SCALAR_ORDER_2
     }
 }
 

@@ -26,6 +26,10 @@ impl<C: EllipticCurve> ECDSA<C> {
             return false;
         }
 
+        if C::is_high(s) {
+            return false;
+        }
+
         // Compute s^-1
         let s_inv = C::scalar_inverse(s);
 

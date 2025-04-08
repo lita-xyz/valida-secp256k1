@@ -28,4 +28,6 @@ pub trait EllipticCurve: Sized + Clone + Debug {
 
     /// Reduces a hash value to a scalar
     fn reduce_hash(hash: &[u8; 32]) -> Self::Scalar;
+
+    fn is_high(s: &Self::Scalar) -> bool;
 }
