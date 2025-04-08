@@ -1,70 +1,44 @@
-use lazy_static::lazy_static;
-use num_bigint::BigUint;
-use num_traits::ops::euclid::Euclid;
-use std::fmt::Debug;
-
-use crate::elliptic_curve::EllipticCurve;
+use crate::elliptic_curve::{
+    CheckedAdd, EllipticCurve, FromLeBytes, HasGenerator, HasNeutral, HasSqrt, IsOdd, ToLeBytes,
+};
+use k256::{
+    elliptic_curve::{bigint::ArrayEncoding, Curve},
+    Secp256k1, U256,
+};
+use std::{
+    fmt::Debug,
+    ops::{Add, Mul},
+};
 use valida_intrinsics as intrinsics;
+pub mod base_field;
+pub use base_field::*;
+pub mod scalar_field;
+pub use scalar_field::*;
+mod constants;
+use constants::*;
 
-lazy_static! {
-    static ref SCALAR_ORDER: BigUint = {
-        BigUint::parse_bytes(
-            b"fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
-            16,
-        )
-        .unwrap()
-    };
+impl Mul<Secp256k1Scalar> for Secp256k1Point {
+    type Output = Secp256k1Point;
+
+    fn mul(self, rhs: Secp256k1Scalar) -> Self::Output {
+        let mut copied = self;
+        intrinsics::smul_secp256k1(&rhs.0, &mut copied.0);
+        copied
+    }
 }
-
-lazy_static! {
-    static ref FRAC_SCALAR_ORDER_2: BigUint = SCALAR_ORDER.div_euclid(&BigUint::from(2 as u32));
-}
-
-lazy_static! {
-    static ref BASE_FIELD: BigUint = {
-        BigUint::parse_bytes(
-            b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f",
-            16,
-        )
-        .unwrap()
-    };
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Secp256k1Scalar(intrinsics::Secp256k1Scalar);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Secp256k1Point(intrinsics::Secp256k1Point);
 
-fn scalar_reduce(s: &intrinsics::Secp256k1Scalar) -> intrinsics::Secp256k1Scalar {
-    let value = BigUint::from_bytes_le(&s.value);
-
-    let r = value.rem_euclid(&SCALAR_ORDER);
-    let value: [u8; 32] = r.to_bytes_le().try_into().unwrap();
-
-    intrinsics::Secp256k1Scalar { value }
-}
-
-impl Secp256k1Scalar {
-    pub fn create(value: [u8; 32]) -> Option<Self> {
-        let value_as_biguint = BigUint::from_bytes_le(&value);
-        if value_as_biguint < *SCALAR_ORDER {
-            Some(Secp256k1Scalar(intrinsics::Secp256k1Scalar { value }))
-        } else {
-            None
-        }
-    }
-}
-
 impl Secp256k1Point {
     pub fn create(x_bytes: [u8; 32], y_bytes: [u8; 32]) -> Option<Self> {
-        let x = BigUint::from_bytes_le(&x_bytes);
-        let y = BigUint::from_bytes_le(&y_bytes);
+        let x = Secp256k1FieldElement::from_repr(&x_bytes)?;
+        let y = Secp256k1FieldElement::from_repr(&y_bytes)?;
 
-        let lhs = &y * &y;
-        let rhs = &x * &x * &x + BigUint::from(7 as u8);
+        let lhs = y * &y;
+        let rhs = x * &x * &x + 7 as u64;
 
-        let satisfies_equation = lhs.rem_euclid(&BASE_FIELD) == rhs.rem_euclid(&BASE_FIELD);
+        let satisfies_equation = lhs.0.normalize() == rhs.0.normalize();
 
         if satisfies_equation {
             Some(Secp256k1Point(intrinsics::Secp256k1Point {
@@ -75,57 +49,17 @@ impl Secp256k1Point {
             None
         }
     }
+
+    pub fn to_repr(&self) -> ([u8; 32], [u8; 32]) {
+        (self.0.x, self.0.y)
+    }
 }
 
-const R_GEN: ([u8; 32], [u8; 32]) = {
-    match (
-        const_hex::const_decode_to_array(
-            b"0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-        ),
-        const_hex::const_decode_to_array(
-            b"0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8",
-        ),
-    ) {
-        (Ok(a), Ok(b)) => ({ a }, { b }),
-        _ => panic!("Failed to decode hex values"),
-    }
-};
+impl Add for Secp256k1Point {
+    type Output = Self;
 
-impl EllipticCurve for Secp256k1Point {
-    type Scalar = Secp256k1Scalar;
-
-    fn neutral() -> Self {
-        Default::default()
-    }
-
-    fn generator() -> Self {
-        Secp256k1Point(intrinsics::Secp256k1Point {
-            x: {
-                let mut v = R_GEN.0.clone();
-                v.reverse();
-                v
-            },
-            y: {
-                let mut v = R_GEN.1.clone();
-                v.reverse();
-                v
-            },
-        })
-    }
-
-    fn scalar_mul(&self, k: &Self::Scalar) -> Self {
-        let mut copied = *self;
-        intrinsics::smul_secp256k1(&k.0, &mut copied.0);
-        copied
-    }
-
-    fn scalar_inverse(k: &Self::Scalar) -> Self::Scalar {
-        let mut copied = *k;
-        intrinsics::sinv_secp256k1(&mut copied.0);
-        copied
-    }
-
-    fn add(&self, other: &Self) -> Self {
+    #[inline(always)]
+    fn add(self, rhs: Self) -> Self::Output {
         const ONE: [u8; 32] = {
             let mut x: [u8; 32] = [0; 32];
             x[0] = 1;
@@ -138,26 +72,82 @@ impl EllipticCurve for Secp256k1Point {
         };
 
         let mut arg_2 = intrinsics::Secp256k1Comb {
-            point: other.0,
+            point: rhs.0,
             scalar: intrinsics::Secp256k1Scalar { value: ONE },
         };
 
         intrinsics::comb_secp256k1(&arg_1, &mut arg_2);
         Secp256k1Point(arg_2.point)
     }
+}
 
+impl HasNeutral for Secp256k1Point {
+    #[inline(always)]
+    fn neutral() -> Self {
+        Default::default()
+    }
+}
+
+const GENERATOR: Secp256k1Point = Secp256k1Point(intrinsics::Secp256k1Point {
+    x: R_GEN.0,
+    y: R_GEN.1,
+});
+
+impl HasGenerator for Secp256k1Point {
+    #[inline(always)]
+    fn generator() -> &'static Self {
+        &GENERATOR
+    }
+}
+
+impl TryFrom<(Secp256k1FieldElement, Secp256k1FieldElement)> for Secp256k1Point {
+    type Error = ();
+
+    #[inline(always)]
+    fn try_from(
+        value: (Secp256k1FieldElement, Secp256k1FieldElement),
+    ) -> Result<Self, Self::Error> {
+        let x = value.0.to_repr();
+        let y = value.1.to_repr();
+
+        Ok(Secp256k1Point(intrinsics::Secp256k1Point { x, y }))
+    }
+}
+
+impl CheckedAdd for U256 {
+    #[inline(always)]
+    fn checked_add(&self, rhs: &Self) -> Option<Self> {
+        k256::elliptic_curve::bigint::CheckedAdd::checked_add(self, rhs).into_option()
+    }
+}
+
+impl FromLeBytes for U256 {
+    #[inline(always)]
+    fn from_le_bytes(bytes: &[u8]) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        Some(U256::from_le_slice(bytes))
+    }
+}
+
+impl ToLeBytes for U256 {
+    #[inline(always)]
+    fn to_le_bytes(&self) -> Vec<u8> {
+        self.to_le_byte_array().to_vec()
+    }
+}
+
+impl EllipticCurve for Secp256k1Point {
+    type Scalar = Secp256k1Scalar;
+    type Uint = U256;
+
+    #[inline(always)]
     fn get_x_coord(&self) -> Self::Scalar {
-        Secp256k1Scalar(scalar_reduce(&intrinsics::Secp256k1Scalar {
-            value: self.0.x,
-        }))
+        scalar_reduce(&self.0.x)
     }
 
-    fn scalar_mul_mod(a: &Self::Scalar, b: &Self::Scalar) -> Self::Scalar {
-        let mut copied = *b;
-        intrinsics::muls_secp256k1(&a.0, &mut copied.0);
-        copied
-    }
-
+    #[inline(always)]
     fn reduce_hash(hash: &[u8; 32]) -> Self::Scalar {
         let mut r: intrinsics::Secp256k1Scalar = Default::default();
 
@@ -166,23 +156,56 @@ impl EllipticCurve for Secp256k1Point {
         b32_copied.reverse();
         r.value = b32_copied;
 
-        Secp256k1Scalar(scalar_reduce(&r))
+        scalar_reduce(&r.value)
     }
 
+    #[inline(always)]
     fn is_high(s: &Self::Scalar) -> bool {
-        BigUint::from_bytes_le(&s.0.value) > *FRAC_SCALAR_ORDER_2
+        s.is_high()
     }
+
+    #[inline(always)]
+    fn lin_comb(s1: &Self::Scalar, p1: &Self, s2: &Self::Scalar, p2: &Self) -> Self {
+        let arg_1 = intrinsics::Secp256k1Comb {
+            point: p1.0,
+            scalar: s1.0,
+        };
+        let mut arg_2 = intrinsics::Secp256k1Comb {
+            point: p2.0,
+            scalar: s2.0,
+        };
+        intrinsics::comb_secp256k1(&arg_1, &mut arg_2);
+
+        Secp256k1Point(arg_2.point)
+    }
+
+    #[inline(always)]
+    fn decompress(bytes_le: &[u8], is_y_odd: bool) -> Option<Self> {
+        let fx = Secp256k1FieldElement::from_le_bytes(bytes_le)?;
+
+        let y_squared = fx * &fx * &fx + 7 as u64;
+        let y_r = y_squared.sqrt()?;
+
+        let y = if y_r.is_odd() != is_y_odd { -y_r } else { y_r };
+
+        Self::try_from((fx, y)).ok()
+    }
+
+    const ORDER: Self::Uint = Secp256k1::ORDER;
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::elliptic_curve::FromLeBytes;
+    use crate::elliptic_curve::MultiplicativeInverse;
+
     use super::Secp256k1Point as P;
     use super::Secp256k1Scalar as S;
     use super::*;
 
     #[test]
     fn add_neutral_to_generator() {
-        assert_eq!(P::generator().add(&P::neutral()), P::generator());
+        assert_eq!(*P::generator() + P::neutral(), *P::generator());
     }
 
     #[test]
@@ -191,8 +214,8 @@ mod tests {
         two[0] = 2;
 
         assert_eq!(
-            P::generator().add(&P::generator()),
-            P::generator().scalar_mul(&S::create(two).unwrap())
+            *P::generator() + *P::generator(),
+            *P::generator() * S::from_le_bytes(&two).unwrap()
         );
     }
 
@@ -204,10 +227,10 @@ mod tests {
         let mut one: [u8; 32] = [0; 32];
         one[0] = 1;
 
-        let one = S::create(one).unwrap();
-        let two = S::create(two).unwrap();
-        let two_inv = P::scalar_inverse(&two);
+        let one = S::from_le_bytes(&one).unwrap();
+        let two = S::from_le_bytes(&two).unwrap();
+        let two_inv = two.inverse();
 
-        assert_eq!(P::scalar_mul_mod(&two, &two_inv), one);
+        assert_eq!(two * two_inv, one);
     }
 }

@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 hex = "0.4.3"
 const-hex = "1.14.0"
-num-bigint = "0.4.6"
-num-traits = "0.2.18"
-lazy_static = "1.5.0"
+ff = "0.13"
 valida-intrinsics = { git = "https://github.com/lita-xyz/valida-intrinsics.git", rev = "9a954d056eedec7d4506729cca84dbcc226c47c7" }
+k256 = { version = "0.13.4", default-features = false, features = ["expose-field", "arithmetic"] }
